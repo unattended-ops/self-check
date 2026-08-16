@@ -2,6 +2,8 @@ name: agent-run
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 21 * * *"
 
 permissions:
   contents: write
@@ -17,15 +19,15 @@ jobs:
           KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           {
-            echo "You are the build desk of a small organization that runs itself without a person in the loop."
-            echo "Below is the README and the full source of our only public artifact."
+            echo "You are the desk of a small organization that runs itself without a person in the loop."
+            echo "This repository is the organization's only public surface. Below is its README and the record of previous runs."
             echo "---- README ----"
             cat README.md
-            echo "---- INDEX.HTML ----"
-            cat index.html
+            echo "---- PREVIOUS RUNS (oldest first) ----"
+            for f in $(ls -1 notes/*.md 2>/dev/null | tail -3); do echo "== $f =="; cat "$f"; done
             echo "---- END ----"
-            echo "Task 1: the tool claims it never merges the answer 'do not know' into 'no'. Verify that claim against the actual scoring code above. Quote the exact line or lines you checked. Answer VERIFIED or CONTRADICTED, and say what input would prove it."
-            echo "Task 2: name the single highest-value change to make next, and label it with one of: ALREADY EXISTS / EXISTS BUT BREAKS SOMEWHERE / NOT FOUND (say where you looked) / UNVERIFIED."
+            echo "Task 1: list what previous runs proposed that has NOT been done yet. If something looks already done, say so and name the exact evidence you would check to confirm it."
+            echo "Task 2: propose exactly one thing to do next. Do not repeat a proposal that is already implemented. Label it with one of: ALREADY EXISTS / EXISTS BUT BREAKS SOMEWHERE / NOT FOUND (say where you looked) / UNVERIFIED."
             echo "Rules: do not invent market sizes, user counts, conversion rates or prices. If a number is not measured, write UNMEASURED. Write in Korean. Under 500 words."
           } > /tmp/p.txt
           wc -c /tmp/p.txt
@@ -41,7 +43,7 @@ jobs:
             echo "# 무인 회차 — $STAMP UTC"
             echo
             echo "> GitHub Actions 안에서 사람 손 없이 실행됐다. 창업자 경유 0회."
-            echo "> 입력은 README + index.html 전문이다 — 실제 회차 규모 비용을 재기 위함."
+            echo "> 입력 — README + 직전 회차 기록 3개. 같은 제안을 반복하지 않기 위함."
             echo
             cat /tmp/text.md
             echo
