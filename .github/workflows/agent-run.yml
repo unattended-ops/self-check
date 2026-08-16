@@ -26,10 +26,13 @@ jobs:
             echo "Task 2: propose exactly one thing to build next, and label it with one of these four: ALREADY EXISTS / EXISTS BUT BREAKS SOMEWHERE / NOT FOUND (say where you looked) / UNVERIFIED."
             echo "Rules: do not invent market sizes, user counts, conversion rates or prices. If a number is not measured, write UNMEASURED. Write in Korean. Under 400 words."
           } > /tmp/p.txt
-          jq -Rs --arg m claude-opus-5 '{model:$m,max_tokens:1500,messages:[{role:"user",content:.}]}' /tmp/p.txt > /tmp/req.json
+          jq -Rs --arg m claude-opus-5 '{model:$m,max_tokens:6000,messages:[{role:"user",content:.}]}' /tmp/p.txt > /tmp/req.json
           curl -s -o /tmp/resp.json -w "HTTP %{http_code}" https://api.anthropic.com/v1/messages -H "x-api-key: $KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" -d @/tmp/req.json
           echo
+          echo "STOP: $(jq -r '.stop_reason' /tmp/resp.json)"
+          echo "BLOCKS: $(jq -c '[.content[].type]' /tmp/resp.json)"
           echo "USAGE: $(jq -c '.usage' /tmp/resp.json)"
+          jq -r '.content[] | select(.type=="text") | .text' /tmp/resp.json > /tmp/text.md
           mkdir -p notes
           DATE=$(date -u +%Y-%m-%d)
           {
@@ -37,10 +40,10 @@ jobs:
             echo
             echo "> GitHub Actions 안에서 사람 손 없이 실행됐다. 창업자 경유 0회."
             echo
-            jq -r '.content[0].text' /tmp/resp.json
+            cat /tmp/text.md
             echo
             echo "---"
-            echo "model: $(jq -r '.model' /tmp/resp.json)"
+            echo "model: $(jq -r '.model' /tmp/resp.json) / stop: $(jq -r '.stop_reason' /tmp/resp.json)"
             echo "usage: $(jq -c '.usage' /tmp/resp.json)"
           } > notes/$DATE.md
           cat notes/$DATE.md
