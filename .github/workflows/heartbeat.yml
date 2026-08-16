@@ -1,0 +1,36 @@
+name: heartbeat
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 17 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  beat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: probe outbound
+        run: |
+          for h in dev.to bsky.social api.anthropic.com api.github.com pypi.org github.com; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$h/" || echo conn-fail)
+            echo "$h -> $code"
+          done
+
+      - name: write heartbeat
+        run: |
+          mkdir -p log
+          date -u +"%Y-%m-%dT%H:%M:%SZ ran" >> log/heartbeat.txt
+          tail -n 5 log/heartbeat.txt
+
+      - name: commit
+        run: |
+          git config user.name "unattended-ops"
+          git config user.email "actions@github.com"
+          git add log/heartbeat.txt
+          git commit -m "heartbeat" || exit 0
+          git push
