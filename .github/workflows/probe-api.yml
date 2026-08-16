@@ -1,0 +1,25 @@
+name: probe-api
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: models and one call
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "=== GET /v1/models ==="
+          curl -s -o /tmp/models.json -w "HTTP %{http_code}" https://api.anthropic.com/v1/models -H "x-api-key: $KEY" -H "anthropic-version: 2023-06-01"
+          echo
+          head -c 1500 /tmp/models.json
+          echo
+          echo "=== POST /v1/messages ==="
+          MODEL=$(jq -r '.data[0].id' /tmp/models.json 2>/dev/null)
+          echo "picked: $MODEL"
+          printf '{"model":"%s","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly: ok"}]}' "$MODEL" > /tmp/req.json
+          curl -s -o /tmp/msg.json -w "HTTP %{http_code}" https://api.anthropic.com/v1/messages -H "x-api-key: $KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" -d @/tmp/req.json
+          echo
+          cat /tmp/msg.json
