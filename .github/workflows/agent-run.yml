@@ -14,21 +14,77 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── 06시 슬롯 = reach-kr (2026-08-17 창업자 승인) ──
+      # 이 단계가 이 자리의 존재 이유다. 문서에서 읽지 않고 계정에서 잰다.
+      - name: measure-dev
+        env:
+          DEV_KEY: ${{ secrets.DEV_API_KEY }}
+        run: |
+          set +e
+          : > /tmp/dev.txt
+
+          echo "== A. 계정 상태 (읽기) ==" >> /tmp/dev.txt
+          for form in "https://dev.to/api/articles?username=unmannedops&per_page=100" \
+                      "https://dev.to/api/articles/latest?username=unmannedops&per_page=100"; do
+            code=$(curl -s -o /tmp/list.json -w '%{http_code}' "$form")
+            n=$(jq 'length' /tmp/list.json 2>/dev/null || echo "PARSE_FAIL")
+            echo "질의: $form -> HTTP $code / 건수 $n" >> /tmp/dev.txt
+          done
+          echo "--- 글 목록 ---" >> /tmp/dev.txt
+          jq -r '.[] | "id=\(.id) published_at=\(.published_at) reactions=\(.public_reactions_count) comments=\(.comments_count) title=\(.title)"' \
+            /tmp/list.json >> /tmp/dev.txt 2>/dev/null
+
+          echo "" >> /tmp/dev.txt
+          echo "== B. 쓰기 실측 (초안 1건 · published:false · 되돌릴 수 있다) ==" >> /tmp/dev.txt
+          if [ -z "$DEV_KEY" ]; then
+            echo "DEV_API_KEY 없음 — 쓰기 미실측" >> /tmp/dev.txt
+          else
+            STAMP=$(date -u +%Y-%m-%d-%H%M)
+            jq -n --arg t "write-probe $STAMP (draft, not published)" \
+              '{article:{title:$t,published:false,body_markdown:"probe"}}' > /tmp/probe.json
+            wcode=$(curl -s -o /tmp/wresp.json -w '%{http_code}' \
+              -X POST https://dev.to/api/articles \
+              -H "api-key: $DEV_KEY" \
+              -H "Content-Type: application/json" \
+              -d @/tmp/probe.json)
+            echo "POST /api/articles -> HTTP $wcode" >> /tmp/dev.txt
+            echo "--- 응답 본문 (상태 코드가 아니라 이것을 읽는다) ---" >> /tmp/dev.txt
+            head -c 1200 /tmp/wresp.json >> /tmp/dev.txt
+            echo "" >> /tmp/dev.txt
+            pid=$(jq -r '.id // empty' /tmp/wresp.json 2>/dev/null)
+            if [ -n "$pid" ]; then
+              echo "판정: 쓰기 열림 — 초안 id=$pid" >> /tmp/dev.txt
+              echo "⚠ 이 초안은 창업자가 지운다 (본체는 삭제하지 않는다)" >> /tmp/dev.txt
+            else
+              echo "판정: 쓰기 안 열림 또는 미확인 — 위 본문을 그대로 대장에 옮긴다" >> /tmp/dev.txt
+            fi
+          fi
+          echo "" >> /tmp/dev.txt
+          cat /tmp/dev.txt
+
       - name: think
         env:
           KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           {
-            echo "You are the desk of a small organization that runs itself without a person in the loop."
-            echo "This repository is the organization's only public surface. Below is its README and the record of previous runs."
+            echo "너는 이 조직의 도달 자리(reach-kr)다. 이 회차는 사람 손 없이 돈다."
+            echo "이 저장소가 이 조직의 유일한 공개면이다. 아래는 README와 직전 회차 기록, 그리고 이번 회차가 방금 잰 계정 실측이다."
             echo "---- README ----"
             cat README.md
             echo "---- PREVIOUS RUNS (oldest first) ----"
             for f in $(ls -1 notes/*.md 2>/dev/null | tail -3); do echo "== $f =="; cat "$f"; done
+            echo "---- DEV 실측 (이번 회차가 직접 쳤다) ----"
+            cat /tmp/dev.txt
             echo "---- END ----"
-            echo "Task 1: list what previous runs proposed that has NOT been done yet. If something looks already done, say so and name the exact evidence you would check to confirm it."
-            echo "Task 2: propose exactly one thing to do next. Do not repeat a proposal that is already implemented. Label it with one of: ALREADY EXISTS / EXISTS BUT BREAKS SOMEWHERE / NOT FOUND (say where you looked) / UNVERIFIED."
-            echo "Rules: do not invent market sizes, user counts, conversion rates or prices. If a number is not measured, write UNMEASURED. Write in Korean. Under 500 words."
+            echo "과제 1: 위 실측만 근거로 다음 세 칸을 적는다. 문서에서 읽은 값을 쓰지 않는다."
+            echo "  (1) 올린 것 — 글 수와 각 id. 두 질의 형태의 건수가 다르면 그 사실을 먼저 적는다."
+            echo "  (2) 회신 — 반응/댓글만 센다. 조회수·노출·좋아요는 회신이 아니다. 직전 회차 값과 비교해 늘었으면 id와 증가분을 적는다."
+            echo "  (3) 꺼내졌다 — 안(플랫폼 목록·태그) / 밖(검색엔진) 두 칸. 안 재봤으면 둘 다 미측정."
+            echo "과제 2: 쓰기 실측 결과를 한 줄로 판정한다 — 열림 / 안 열림(본문 인용) / 미실측. 상태 코드만 보고 판정하지 않는다."
+            echo "과제 3: 다음에 할 일을 정확히 하나 제안한다. 이미 된 것을 다시 제안하지 않는다."
+            echo "규칙: 숫자를 지어내지 않는다. 안 센 것은 미실측, 값은 있는데 대조 못 한 것은 미확인 — 0과 같은 칸에 적지 않는다."
+            echo "규칙: 어떤 회사의 내부 사실도 쓰지 않는다. 「올렸다」를 「꺼내졌다」 칸에 적지 않는다."
+            echo "출력: 한국어, 500단어 이내."
           } > /tmp/p.txt
           wc -c /tmp/p.txt
           jq -Rs --arg m claude-opus-5 '{model:$m,max_tokens:6000,messages:[{role:"user",content:.}]}' /tmp/p.txt > /tmp/req.json
@@ -40,13 +96,19 @@ jobs:
           mkdir -p notes
           STAMP=$(date -u +%Y-%m-%d-%H%M)
           {
-            echo "# 무인 회차 — $STAMP UTC"
+            echo "# 무인 회차 (reach-kr) — $STAMP UTC"
             echo
             echo "> GitHub Actions 안에서 사람 손 없이 실행됐다. 창업자 경유 0회."
-            echo "> 입력 — README + 직전 회차 기록 3개. 같은 제안을 반복하지 않기 위함."
+            echo "> 06시 슬롯 배정 = reach-kr (2026-08-17 창업자 승인)."
+            echo "> 입력 — README + 직전 회차 기록 3개 + 이번 회차가 직접 친 DEV 실측."
             echo
             cat /tmp/text.md
             echo
+            echo "---"
+            echo "## 원자료 — 이번 회차가 친 것"
+            echo '```'
+            cat /tmp/dev.txt
+            echo '```'
             echo "---"
             echo "model: $(jq -r '.model' /tmp/resp.json) / stop: $(jq -r '.stop_reason' /tmp/resp.json)"
             echo "usage: $(jq -c '.usage' /tmp/resp.json)"
@@ -58,5 +120,5 @@ jobs:
           git config user.name "unattended-ops"
           git config user.email "actions@github.com"
           git add notes
-          git commit -m "agent run" || exit 0
+          git commit -m "reach-kr run" || exit 0
           git push
