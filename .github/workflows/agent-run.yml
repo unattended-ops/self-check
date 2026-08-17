@@ -55,7 +55,7 @@ jobs:
 
           TITLE=$(sed -n 's/^title:[[:space:]]*//p' "$SRC" | head -1 | sed 's/^"//; s/"$//')
           TAGS=$(sed -n 's/^tags:[[:space:]]*//p' "$SRC" | head -1)
-          BODY=$(awk 'BEGIN{d=0} /^---[[:space:]]*$/{d++; next} d>=2{print}' "$SRC")
+          BODY=$(awk 'BEGIN{d=0} d<2 && /^---[[:space:]]*$/{d++; next} d>=2{print}' "$SRC")
 
           if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
             echo "🔴 게이트 중단 — 제목 또는 본문을 못 읽었다. 발행하지 않는다" >> /tmp/pub.txt
