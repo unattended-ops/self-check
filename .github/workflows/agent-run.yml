@@ -1,22 +1,17 @@
 name: agent-run
-
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 21 * * *"
-
 permissions:
   contents: write
-
 env:
   DEV_USER: unmannedops
-
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       # ── 06시 슬롯 = reach-kr (2026-08-17 창업자 승인) ──
       - name: measure-dev
         env:
@@ -35,7 +30,6 @@ jobs:
           jq -r '.[] | "id=\(.id) at=\(.published_at) reactions=\(.public_reactions_count) comments=\(.comments_count) :: \(.title)"' \
             /tmp/list.json >> /tmp/dev.txt 2>/dev/null
           cat /tmp/dev.txt
-
       # ── C안 게이트 (2026-08-17 창업자 승인) ──
       # 「발행 직전 계정 조회 1회를 통과한 건만 무인 발행한다」
       # 규칙을 늘리지 않고 여기서 강제한다. 코드가 규칙보다 강하다.
@@ -46,23 +40,19 @@ jobs:
           set +e
           : > /tmp/pub.txt
           SRC=$(ls -1 outbox/*.md 2>/dev/null | head -1)
-
           if [ -z "$SRC" ]; then
             echo "발행 후보 없음 (outbox/ 비어 있음) — 이 회차는 발행하지 않는다" >> /tmp/pub.txt
             cat /tmp/pub.txt; exit 0
           fi
           echo "발행 후보: $SRC" >> /tmp/pub.txt
-
           TITLE=$(sed -n 's/^title:[[:space:]]*//p' "$SRC" | head -1 | sed 's/^"//; s/"$//')
           TAGS=$(sed -n 's/^tags:[[:space:]]*//p' "$SRC" | head -1)
           BODY=$(awk 'BEGIN{d=0} d<2 && /^---[[:space:]]*$/{d++; next} d>=2{print}' "$SRC")
-
           if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
             echo "🔴 게이트 중단 — 제목 또는 본문을 못 읽었다. 발행하지 않는다" >> /tmp/pub.txt
             cat /tmp/pub.txt; exit 0
           fi
           echo "제목: $TITLE" >> /tmp/pub.txt
-
           # ── 게이트 ① 계정 조회 1회 (지금 다시 친다. 위 단계 값을 재사용하지 않는다) ──
           gcode=$(curl -s -o /tmp/g.json -w '%{http_code}' \
             "https://dev.to/api/articles?username=$DEV_USER&per_page=100&t=$(date +%s)")
@@ -72,7 +62,6 @@ jobs:
             echo "🔴 게이트 중단 — 계정 상태를 못 읽었다. 못 읽었으면 발행하지 않는다" >> /tmp/pub.txt
             cat /tmp/pub.txt; exit 0
           fi
-
           # ── 게이트 ② 같은 제목이 이미 계정에 있는가 (18행·§2-R이 막던 것) ──
           norm() { echo "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]'; }
           NT=$(norm "$TITLE")
@@ -83,7 +72,6 @@ jobs:
             cat /tmp/pub.txt; exit 0
           fi
           echo "게이트 통과 — 계정에 같은 제목 없음" >> /tmp/pub.txt
-
           # ── 발행 ──
           jq -n --arg t "$TITLE" --arg b "$BODY" --arg g "$TAGS" \
             '{article:{title:$t,published:true,body_markdown:$b,tags:($g|split(",")|map(gsub("^ +| +$";"")))}}' \
@@ -95,7 +83,6 @@ jobs:
           echo "--- 응답 본문 (상태 코드가 아니라 이것을 읽는다) ---" >> /tmp/pub.txt
           head -c 900 /tmp/presp.json >> /tmp/pub.txt
           echo "" >> /tmp/pub.txt
-
           # ── 사후 확인: 문서가 아니라 계정에서 다시 잰다 ──
           NEWID=$(jq -r '.id // empty' /tmp/presp.json)
           if [ -n "$NEWID" ]; then
@@ -110,7 +97,6 @@ jobs:
             echo "판정: 발행 안 됨 또는 미확인 — 위 본문을 그대로 대장에 옮긴다. outbox는 그대로 둔다" >> /tmp/pub.txt
           fi
           cat /tmp/pub.txt
-
       - name: think
         env:
           KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -167,11 +153,52 @@ jobs:
             echo "usage: $(jq -c '.usage' /tmp/resp.json)"
           } > notes/$STAMP.md
           cat notes/$STAMP.md
-
+      # ── ① 회의실 안건 투입 (2026-08-19 신설 · 무인) ──
+      # 발행이 정상이 아닐 때만 안건/ 에 파일 1개를 쓴다.
+      # 맥의 회의실 진행기가 60초 폴링으로 집어 스스로 회의를 연다. 창업자 경유 0.
+      # 발행이 정상인 날은 안 쓴다 — 매일 회의가 열리면 그것이 낭비다.
+      - name: agenda
+        run: |
+          set +e
+          P=/tmp/pub.txt
+          if [ ! -f "$P" ]; then
+            echo "발행 게이트 기록이 없다 — 안건 없음"; exit 0
+          fi
+          if grep -q '판정: 발행 완료' "$P"; then
+            echo "발행 정상 — 안건 없음"; exit 0
+          fi
+          if grep -q '발행 후보 없음' "$P"; then
+            SUBJ="발행 큐가 비었다 — 이번 회차에 밖으로 나간 것이 0건이다"
+          elif grep -q '게이트 중단' "$P"; then
+            SUBJ="발행 게이트가 막았다 — 무엇이 막았고 다시 열려면 무엇이 필요한가"
+          else
+            SUBJ="발행을 시도했으나 확인되지 않았다 — 발행함/안 함 중 무엇으로 셀 것인가"
+          fi
+          STAMP=$(date -u +%Y-%m-%d-%H%M)
+          NOUT=$(ls -1 outbox/*.md 2>/dev/null | wc -l | tr -d ' ')
+          NPUB=$(ls -1 published/*.md 2>/dev/null | wc -l | tr -d ' ')
+          mkdir -p 안건
+          {
+            echo "# $SUBJ"
+            echo
+            echo "## 알려진 사실"
+            echo "- 회차 — $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC · 06시 슬롯 · reach-kr · 사람 손 0회"
+            echo "- outbox/ 발행 후보 — ${NOUT}건"
+            echo "- published/ 누적 — ${NPUB}건"
+            echo "- 발행 게이트 원자료 —"
+            sed 's/^/  /' "$P"
+            echo
+            echo "## 조직 규칙"
+            echo "- 밖으로 나간 것이 0인 주는 돈 것이 아니라 쌓인 주다"
+            echo "- 만든 것을 큐에 못 넣으면 원고를 더 만들어도 발행 편수는 안 는다"
+            echo "- 숫자를 지어내지 않는다. 안 센 것은 미실측, 대조 못 한 것은 미확인"
+          } > "안건/${STAMP}-발행결과.md"
+          echo "안건 1건 생성 — 안건/${STAMP}-발행결과.md"
+          cat "안건/${STAMP}-발행결과.md"
       - name: commit
         run: |
           git config user.name "unattended-ops"
           git config user.email "actions@github.com"
-          git add -A notes outbox published 2>/dev/null || git add notes
+          git add -A notes outbox published 안건 2>/dev/null || git add notes
           git commit -m "reach-kr run" || exit 0
           git push
