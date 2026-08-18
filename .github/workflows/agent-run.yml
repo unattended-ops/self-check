@@ -197,8 +197,18 @@ jobs:
           cat "안건/${STAMP}-발행결과.md"
       - name: commit
         run: |
+          set +e
           git config user.name "unattended-ops"
           git config user.email "actions@github.com"
-          git add -A notes outbox published 안건 2>/dev/null || git add notes
+          # 🔴 2026-08-19 실측 — `git add -A a b c` 는 하나라도 없는 경로가 있으면
+          # 전체가 exit 128 로 죽고 **아무것도 담기지 않는다**. outbox/ 가 비면서 드러났다.
+          # 그래서 폴더를 먼저 만들고, 하나씩 담는다.
+          mkdir -p notes outbox published 안건
+          [ -e outbox/.gitkeep ] || : > outbox/.gitkeep
+          for d in notes outbox published 안건; do
+            [ -d "$d" ] && git add -A "$d"
+          done
+          echo "--- 담긴 것 ---"
+          git diff --cached --name-only
           git commit -m "reach-kr run" || exit 0
           git push
