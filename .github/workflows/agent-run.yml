@@ -2,7 +2,9 @@ name: agent-run
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 21 * * *"
+    # 06:00 정각은 GitHub 스케줄 혼잡 구간이다 — 2026-08-20 실측 55분 지연.
+    # 20:40 UTC = 05:40 KST. 밀려도 06시 언저리에 떨어진다.
+    - cron: "40 20 * * *"
 permissions:
   contents: write
 env:
@@ -156,7 +158,8 @@ jobs:
       # ── ① 회의실 안건 투입 (2026-08-19 신설 · 무인) ──
       # 발행이 정상이 아닐 때만 안건/ 에 파일 1개를 쓴다.
       # 맥의 회의실 진행기가 60초 폴링으로 집어 스스로 회의를 연다. 창업자 경유 0.
-      # 발행이 정상인 날은 안 쓴다 — 매일 회의가 열리면 그것이 낭비다.
+      # 발행이 정상인 날도 「일일 보고」 1건을 남긴다 — 사회 1콜이 걸러 방에 두 줄만 뜬다.
+      # 성공도 침묵이면 창업자가 매일 저장소를 열어봐야 한다(경유 증가). 2026-08-20 창업자 승인.
       - name: agenda
         run: |
           set +e
@@ -164,8 +167,26 @@ jobs:
           if [ ! -f "$P" ]; then
             echo "발행 게이트 기록이 없다 — 안건 없음"; exit 0
           fi
+          STAMP=$(date -u +%Y-%m-%d-%H%M)
+          NOUT=$(ls -1 outbox/*.md 2>/dev/null | wc -l | tr -d ' ')
+          NPUB=$(ls -1 published/*.md 2>/dev/null | wc -l | tr -d ' ')
+          mkdir -p 안건
           if grep -q '판정: 발행 완료' "$P"; then
-            echo "발행 정상 — 안건 없음"; exit 0
+            F="안건/${STAMP}-발행정상-누적${NPUB}편-큐${NOUT}건.md"
+            {
+              echo "# 일일 보고 — 발행 정상. 이상 없음."
+              echo
+              echo "**이 파일은 회차 보고다. 판정이 갈리는 것이 없다. 토론할 값이 아니다.**"
+              echo
+              echo "## 알려진 사실"
+              echo "- 회차 — $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC · 06시 슬롯 · reach-kr · 사람 손 0회"
+              echo "- 발행 — 완료"
+              echo "- published/ 누적 — ${NPUB}건"
+              echo "- outbox/ 남은 발행 후보 — ${NOUT}건"
+            } > "$F"
+            echo "일일 보고 1건 생성 — $F"
+            cat "$F"
+            exit 0
           fi
           if grep -q '발행 후보 없음' "$P"; then
             SUBJ="발행 큐가 비었다 — 이번 회차에 밖으로 나간 것이 0건이다"
@@ -174,10 +195,6 @@ jobs:
           else
             SUBJ="발행을 시도했으나 확인되지 않았다 — 발행함/안 함 중 무엇으로 셀 것인가"
           fi
-          STAMP=$(date -u +%Y-%m-%d-%H%M)
-          NOUT=$(ls -1 outbox/*.md 2>/dev/null | wc -l | tr -d ' ')
-          NPUB=$(ls -1 published/*.md 2>/dev/null | wc -l | tr -d ' ')
-          mkdir -p 안건
           {
             echo "# $SUBJ"
             echo
