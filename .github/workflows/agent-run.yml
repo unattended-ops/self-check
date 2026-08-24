@@ -32,6 +32,52 @@ jobs:
           jq -r '.[] | "id=\(.id) at=\(.published_at) reactions=\(.public_reactions_count) comments=\(.comments_count) :: \(.title)"' \
             /tmp/list.json >> /tmp/dev.txt 2>/dev/null
           cat /tmp/dev.txt
+      # ── §9-3 회신 원장 (2026-08-25 창업자 승인) ──
+      # measure-dev가 방금 받은 /tmp/list.json(최신 목록, comments_count 포함)을 그대로 쓴다.
+      # 새 API 호출을 하지 않는다 — 위 단계 값을 재사용한다.
+      # id별 직전 댓글 수를 log/댓글-카운트.json에 저장해 두고, 늘었으면
+      # notes/회신-원장.md에 한 줄 append 한다. 안 늘었으면 아무것도 안 쓴다.
+      - name: reply-ledger
+        run: |
+          set +e
+          mkdir -p log notes
+          PREV=log/댓글-카운트.json
+          [ -f "$PREV" ] || echo '{}' > "$PREV"
+          : > /tmp/reply_new.txt
+          if [ -f /tmp/list.json ]; then
+            jq -c '.[] | {id, comments: .comments_count, title}' /tmp/list.json 2>/dev/null > /tmp/reply_rows.jsonl
+          else
+            : > /tmp/reply_rows.jsonl
+          fi
+          while IFS= read -r row; do
+            [ -z "$row" ] && continue
+            id=$(echo "$row" | jq -r '.id')
+            cnt=$(echo "$row" | jq -r '.comments')
+            title=$(echo "$row" | jq -r '.title')
+            prev=$(jq -r --arg id "$id" '.[$id] // 0' "$PREV")
+            case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+            case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+            if [ "$cnt" -gt "$prev" ]; then
+              diff=$((cnt - prev))
+              echo "- $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC · id=$id · comments $prev -> $cnt (+$diff) · $title" >> /tmp/reply_new.txt
+            fi
+          done < /tmp/reply_rows.jsonl
+          # 이번 조회값으로 카운트 전체를 덮어쓴다 (id를 문자열 키로 저장)
+          if [ -s /tmp/reply_rows.jsonl ]; then
+            jq -s 'map({(.id|tostring): .comments}) | add // {}' /tmp/reply_rows.jsonl > "$PREV.tmp" \
+              && mv "$PREV.tmp" "$PREV"
+          fi
+          if [ -s /tmp/reply_new.txt ]; then
+            {
+              echo ""
+              echo "## 신규 회신 — $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC"
+              cat /tmp/reply_new.txt
+            } >> notes/회신-원장.md
+            echo "신규 회신 $(wc -l < /tmp/reply_new.txt | tr -d ' ')건 — notes/회신-원장.md에 기록"
+            cat /tmp/reply_new.txt
+          else
+            echo "신규 회신 없음 (증가분 0)"
+          fi
       # ── C안 게이트 (2026-08-17 창업자 승인) ──
       # 「발행 직전 계정 조회 1회를 통과한 건만 무인 발행한다」
       # 규칙을 늘리지 않고 여기서 강제한다. 코드가 규칙보다 강하다.
@@ -122,6 +168,38 @@ jobs:
             echo "판정: 발행 안 됨 또는 미확인 — 위 본문을 그대로 대장에 옮긴다. outbox는 그대로 둔다" >> /tmp/pub.txt
           fi
           cat /tmp/pub.txt
+      # ── §9 발행 요약 (2026-08-25 창업자 승인) ──
+      # 위 단계들이 이미 만들어 둔 /tmp/pub.txt · /tmp/reply_new.txt를 읽기만 한다.
+      # 새로 계산하지 않는다 — 사람이 Actions 실행 화면 Summary 탭에서
+      # 로그를 안 뒤지고도 "발행됐는지 / 게이트가 막았는지 / 신규 회신이 왔는지"를 바로 보게 한다.
+      - name: publish-summary
+        run: |
+          set +e
+          {
+            echo "### 발행 요약 — $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC"
+            if [ -f /tmp/pub.txt ]; then
+              if grep -q '판정: 발행 완료' /tmp/pub.txt; then
+                ID=$(grep -o 'id=[0-9]*' /tmp/pub.txt | tail -1)
+                URL=$(grep '^url = ' /tmp/pub.txt | sed 's/^url = //')
+                echo "- ✅ 발행됨 — $ID"
+                echo "- 주소 — $URL"
+              elif grep -q '게이트 중단' /tmp/pub.txt; then
+                REASON=$(grep '게이트 중단' /tmp/pub.txt | tail -1 | sed 's/^🔴 게이트 중단 — //')
+                echo "- 🔴 게이트가 막았다 — $REASON"
+              elif grep -q '발행 후보 없음' /tmp/pub.txt; then
+                echo "- ⚪ 발행 후보 없음 — outbox 비어 있음"
+              else
+                echo "- 🔴 판정 불명 — /tmp/pub.txt 원문 확인 필요"
+              fi
+            else
+              echo "- (발행 단계 실행 안 됨)"
+            fi
+            if [ -s /tmp/reply_new.txt ]; then
+              echo "- 🆕 신규 회신 $(wc -l < /tmp/reply_new.txt | tr -d ' ')건"
+            else
+              echo "- 신규 회신 없음"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: think
         env:
           KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -243,9 +321,9 @@ jobs:
           # 🔴 2026-08-19 실측 — `git add -A a b c` 는 하나라도 없는 경로가 있으면
           # 전체가 exit 128 로 죽고 **아무것도 담기지 않는다**. outbox/ 가 비면서 드러났다.
           # 그래서 폴더를 먼저 만들고, 하나씩 담는다.
-          mkdir -p notes outbox published 안건
+          mkdir -p notes outbox published 안건 log
           [ -e outbox/.gitkeep ] || : > outbox/.gitkeep
-          for d in notes outbox published 안건; do
+          for d in notes outbox published 안건 log; do
             [ -d "$d" ] && git add -A "$d"
           done
           echo "--- 담긴 것 ---"
