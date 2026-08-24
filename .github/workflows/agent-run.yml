@@ -35,6 +35,29 @@ jobs:
       # ── C안 게이트 (2026-08-17 창업자 승인) ──
       # 「발행 직전 계정 조회 1회를 통과한 건만 무인 발행한다」
       # 규칙을 늘리지 않고 여기서 강제한다. 코드가 규칙보다 강하다.
+      # ── 생성 게이트 (2026-08-24 창업자 승인) ──
+      # outbox/에 이미 들어와 있는 원고를 발행 전에 검사한다.
+      # P1(회사 내부 사실 낱말) + 형식 5축, 둘 다 통과해야 발행으로 넘어간다.
+      # REJECT면 발행하지 않고 notes/rejected/로 옮긴다. 이 단계는 원고를
+      # 스스로 짓지 않는다 — 이미 outbox/에 있는 파일만 검사한다.
+      - name: generation-gate
+        run: |
+          set +e
+          SRC=$(ls -1 outbox/*.md 2>/dev/null | head -1)
+          if [ -z "$SRC" ]; then
+            echo "게이트 대상 없음 — outbox 비어 있음"
+            exit 0
+          fi
+          echo "게이트 대상: $SRC"
+          python3 gen_gate.py "$SRC"
+          RC=$?
+          if [ "$RC" -ne 0 ]; then
+            echo "🔴 생성 게이트 REJECT — $SRC 를 notes/rejected/로 옮기고 이번 회차는 발행하지 않는다"
+            mkdir -p notes/rejected
+            git mv "$SRC" "notes/rejected/$(basename "$SRC")" 2>/dev/null || mv "$SRC" "notes/rejected/"
+          else
+            echo "게이트 PASS — $SRC"
+          fi
       - name: publish-gated
         env:
           DEV_KEY: ${{ secrets.DEV_API_KEY }}
