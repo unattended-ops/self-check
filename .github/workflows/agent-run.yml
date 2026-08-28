@@ -1,10 +1,6 @@
 name: agent-run
 on:
   workflow_dispatch:
-  schedule:
-    # 06:00 정각은 GitHub 스케줄 혼잡 구간이다 — 2026-08-20 실측 55분 지연.
-    # 20:40 UTC = 05:40 KST. 밀려도 06시 언저리에 떨어진다.
-    - cron: "40 20 * * *"
 permissions:
   contents: write
 env:
