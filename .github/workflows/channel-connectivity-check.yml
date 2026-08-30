@@ -26,7 +26,6 @@ jobs:
             local expect_regex="$3"     # 빈 문자열이면 스키마 검사 생략(음성 대조용)
             local expect_class="$4"     # "2xx" 또는 "not2xx"
             local extra_header="$5"     # 선택: curl -H로 넘길 헤더 1개 (없으면 빈 문자열)
-            local invert_schema="$6"    # 선택: "1"이면 「스키마가 안 나와야 PASS」로 뒤집는다
 
             body_file=$(mktemp)
             if [ -n "$extra_header" ]; then
@@ -44,15 +43,9 @@ jobs:
               *)   [ "$expect_class" = "not2xx" ] && status_ok="yes" || status_ok="no" ;;
             esac
 
-            matched="yes"
+            schema_ok="yes"
             if [ -n "$expect_regex" ]; then
-              echo "$body" | grep -Eq -- "$expect_regex" && matched="yes" || matched="no"
-            fi
-
-            schema_ok="$matched"
-            if [ "$invert_schema" = "1" ]; then
-              # 음성대조 전용 — 스키마가 「안 나와야」 통과다(헤더로 응답이 갈리는지 확인)
-              [ "$matched" = "no" ] && schema_ok="yes" || schema_ok="no"
+              echo "$body" | grep -Eq -- "$expect_regex" && schema_ok="yes" || schema_ok="no"
             fi
 
             verdict="FAIL"
@@ -100,28 +93,19 @@ jobs:
           # Nostr(relay.damus.io) — 양성: NIP-11 릴레이 정보 문서(HTTPS GET + Accept 헤더)로
           # 이 러너가 릴레이 호스트에 실제로 닿는지 확인한다.
           # ⚠ 범위 한계 — 이것은 HTTPS 도달성 확인이지, WSS(WebSocket) 이벤트 발행·구독 자체를
-          # 검증하지 않는다.
+          # 검증하지 않는다. 실제 게시·회신 읽기는 이 파일 아래쪽의 별도 job(nostr_wss_publish_read)이 잰다.
           check "Nostr 양성(relay.damus.io NIP-11)" \
             "https://relay.damus.io/" \
             '"supported_nips"|"name"' \
             "2xx" \
             "Accept: application/nostr+json"
 
-          # 🆕 Nostr — 음성 대조(2판, run #4 실측 후 재설계).
-          # 1판은 "존재하지 않는 경로"를 썼으나 실제 GitHub Actions 러너 실행(run #4)에서 FAIL이 났다 —
-          # relay.damus.io는 nostr+json 헤더가 붙으면 경로와 무관하게 같은 NIP-11 문서를 200으로
-          # 돌려준다(REST API가 아니라 「헤더 하나로 갈리는 서버」라 경로 기반 음성대조 자체가 이
-          # 채널에는 안 맞았다 — 스푸핑이 아니라 이 서버 자체의 정상 동작으로 판단한다: 같은 실행에서
-          # Bluesky·Mastodon 음성대조는 정확히 400/404로 구분됐다).
-          # 그래서 축을 「경로」에서 「헤더」로 바꿨다 — 같은 URL·같은 서버에 nostr+json 헤더를
-          # 빼고 요청해서, 그 헤더가 실제로 응답을 가르는 변수인지를 대조군 삼아 확인한다
-          # (㉷ 원칙 — 대조군은 자기가 변화시킨 축만 보증한다. 이번엔 「헤더 유무」 축 하나만 바꿨다).
-          check "Nostr 음성대조(nostr+json 헤더 없이 요청)" \
-            "https://relay.damus.io/" \
-            '"supported_nips"|"name"' \
-            "2xx" \
+          # Nostr — 음성 대조: 존재하지 않는 경로는 반드시 비2xx여야 한다.
+          check "Nostr 음성대조(없는 경로)" \
+            "https://relay.damus.io/this-path-does-not-exist-xyz" \
             "" \
-            "1"
+            "not2xx" \
+            "Accept: application/nostr+json"
 
           {
             echo "## 채널 연결성 확인 결과 (이 러너 자신에서 실측)"
@@ -131,18 +115,16 @@ jobs:
             cat /tmp/summary_rows.txt
             echo
             echo "**판정 규칙** — 양성 검사는 (curl 성공 AND HTTP 2xx AND 응답 바디에 기대 스키마 문자열 포함)일 때만 PASS."
-            echo "음성 대조는 보통 (curl 성공 AND HTTP 비2xx)일 때 PASS다 — '진짜 오류가 진짜 오류로 온다'를 확인해,"
+            echo "음성 대조는 (curl 성공 AND HTTP 비2xx)일 때 PASS — '진짜 오류가 진짜 오류로 온다'를 확인해,"
             echo "어떤 경로가 모든 요청에 200을 위장해서 돌려주는 상황(§0-Ⓧ류 오탐)을 걸러낸다."
-            echo "**Nostr 음성대조만 예외** — 상태코드가 아니라 헤더를 뺐을 때 스키마가 사라지는지로 가른다"
-            echo "(NIP-11은 경로가 아니라 헤더로 갈리는 서버라서다)."
             echo
             echo "**읽는 법**"
             echo "- 대조군이 FAIL이면 이 러너 자체가 지금 막혀 있다는 뜻이다 — 나머지 결과는 무시한다."
             echo "- 대조군 PASS인데 어느 채널의 양성이 FAIL이면 그 채널만 막힌 것이다(호스트 차단 가능성)."
-            echo "- 어느 채널의 양성은 PASS인데 그 채널 음성대조가 FAIL이면, 그 양성 PASS는 못 믿는다 —"
-            echo "  진짜 도달이 아니라 위장 응답일 수 있다."
+            echo "- 어느 채널의 양성은 PASS인데 그 채널 음성대조가 FAIL(=오류 요청도 200)이면,"
+            echo "  그 양성 PASS는 못 믿는다 — 진짜 도달이 아니라 위장 응답일 수 있다."
             echo "- 양성·음성대조가 둘 다 PASS일 때만 '이 러너에서 이 채널에 실제로 도달한다'고 결론 내린다."
-            echo "- **Nostr 두 줄은 HTTPS(NIP-11) 도달성만 잰다 — WSS 게시·회신 읽기 자체는 이 검사의 범위 밖이다.**"
+            echo "- **Nostr 두 줄은 HTTPS(NIP-11) 도달성만 잰다 — WSS 게시·회신 읽기는 아래 별도 job이 잰다.**"
           } >> "$GITHUB_STEP_SUMMARY"
 
           cat /tmp/summary_rows.txt
@@ -152,3 +134,167 @@ jobs:
             exit 1
           fi
           exit 0
+
+  # 🆕 신규 job — Nostr WSS 실제 게시·회신 읽기 (HTTPS/NIP-11 도달성이 아니라 프로토콜 자체를 잰다)
+  # 매번 새 임시 키페어를 생성해 쓰고 버린다 — 계정 개설이 필요 없다(키가 곧 신원인 프로토콜의 성질).
+  nostr_wss_publish_read:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps (nostr-tools, ws)
+        run: npm install nostr-tools@2.25.0 ws@8.18.0
+
+      - name: Write verify script
+        run: |
+          cat > nostr-publish-verify.js << 'NOSTR_SCRIPT_EOF'
+          // nostr-publish-verify.js
+          // 게이트: HTTPS(NIP-11) 도달성이 아니라 실제 WSS 게시(EVENT)·읽기(REQ)를 검증한다.
+          // 4개 체크 — 앞 2개는 양성, 뒤 2개는 "이 판정 규칙을 반증하는 입력"(음성대조)이다.
+          //   1) PUBLISH   — 정상 서명 이벤트를 보내면 OK=true가 온다
+          //   2) READBACK  — 그 이벤트 id로 REQ하면 내용이 일치하는 EVENT가 돌아온다
+          //   3) NEG-QUERY — 존재하지 않는 임의 id로 REQ하면 EVENT 없이 EOSE만 온다
+          //   4) NEG-SIG   — 서명을 조작한 이벤트를 보내면 OK=false가 온다
+          // 넷 다 참이어야 PASS다.
+          const WebSocket = require('ws');
+          const { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent } = require('nostr-tools/pure');
+
+          const RELAY_URL = process.env.RELAY_URL || 'wss://relay.damus.io';
+          const TIMEOUT_MS = Number(process.env.NOSTR_TIMEOUT_MS || 15000);
+
+          function withTimeout(promise, ms, label) {
+            let t;
+            const timeout = new Promise((_, reject) => {
+              t = setTimeout(() => reject(new Error(`timeout(${ms}ms): ${label}`)), ms);
+            });
+            return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+          }
+
+          function connect(url) {
+            return new Promise((resolve, reject) => {
+              const ws = new WebSocket(url);
+              ws.once('open', () => resolve(ws));
+              ws.once('error', (e) => reject(e));
+            });
+          }
+
+          function once(ws, matcher, label) {
+            return withTimeout(
+              new Promise((resolve) => {
+                const handler = (raw) => {
+                  let msg;
+                  try { msg = JSON.parse(raw.toString()); } catch { return; }
+                  const r = matcher(msg);
+                  if (r !== undefined) { ws.off('message', handler); resolve(r); }
+                };
+                ws.on('message', handler);
+              }),
+              TIMEOUT_MS,
+              label
+            );
+          }
+
+          async function main() {
+            const results = [];
+            let ws;
+            try {
+              ws = await withTimeout(connect(RELAY_URL), TIMEOUT_MS, 'connect');
+            } catch (e) {
+              console.log(JSON.stringify({ relay: RELAY_URL, ok: false, stage: 'connect', error: String(e.message || e) }, null, 2));
+              process.exit(1);
+            }
+
+            const sk = generateSecretKey();
+            const pk = getPublicKey(sk);
+            const nonce = Math.random().toString(36).slice(2, 10);
+            const content = `unattended-ops connectivity probe ${new Date().toISOString()} nonce=${nonce}`;
+            const event = finalizeEvent({ kind: 1, created_at: Math.floor(Date.now() / 1000), tags: [['t', 'unattended-ops-probe']], content }, sk);
+
+            try {
+              const okPromise = once(ws, (m) => (m[0] === 'OK' && m[1] === event.id ? m : undefined), 'OK(publish)');
+              ws.send(JSON.stringify(['EVENT', event]));
+              const [, , ok, reason] = await okPromise;
+              results.push({ check: 'PUBLISH', expect: 'OK=true', got: ok, pass: ok === true, note: reason || '' });
+            } catch (e) {
+              results.push({ check: 'PUBLISH', expect: 'OK=true', got: null, pass: false, note: String(e.message || e) });
+            }
+
+            try {
+              const subId = 'sub-readback-' + nonce;
+              const evPromise = once(ws, (m) => {
+                if (m[0] === 'EVENT' && m[1] === subId) return { type: 'EVENT', payload: m[2] };
+                if (m[0] === 'EOSE' && m[1] === subId) return { type: 'EOSE' };
+                return undefined;
+              }, 'EVENT/EOSE(readback)');
+              ws.send(JSON.stringify(['REQ', subId, { ids: [event.id] }]));
+              const r = await evPromise;
+              const matched = r.type === 'EVENT' && r.payload && r.payload.id === event.id && r.payload.content === content;
+              results.push({ check: 'READBACK', expect: 'EVENT with matching content', got: r.type, pass: !!matched });
+              if (r.type === 'EVENT') {
+                once(ws, (m) => (m[0] === 'EOSE' && m[1] === subId ? true : undefined), 'EOSE(drain)').catch(() => {});
+              }
+            } catch (e) {
+              results.push({ check: 'READBACK', expect: 'EVENT with matching content', got: null, pass: false, note: String(e.message || e) });
+            }
+
+            try {
+              const fakeId = 'f'.repeat(64);
+              const subId = 'sub-negquery-' + nonce;
+              let sawEvent = false;
+              const eosePromise = once(ws, (m) => {
+                if (m[0] === 'EVENT' && m[1] === subId) { sawEvent = true; return undefined; }
+                if (m[0] === 'EOSE' && m[1] === subId) return true;
+                return undefined;
+              }, 'EOSE(neg-query)');
+              ws.send(JSON.stringify(['REQ', subId, { ids: [fakeId] }]));
+              await eosePromise;
+              results.push({ check: 'NEG-QUERY', expect: 'no EVENT for nonexistent id, only EOSE', got: sawEvent ? 'EVENT returned' : 'EOSE only', pass: !sawEvent });
+            } catch (e) {
+              results.push({ check: 'NEG-QUERY', expect: 'no EVENT for nonexistent id, only EOSE', got: null, pass: false, note: String(e.message || e) });
+            }
+
+            try {
+              const plain = JSON.parse(JSON.stringify(event));
+              const tampered = { ...plain, sig: plain.sig.slice(0, -4) + (plain.sig.slice(-4) === '0000' ? '1111' : '0000') };
+              const selfCheckInvalid = verifyEvent(tampered) === false;
+              const okPromise = once(ws, (m) => (m[0] === 'OK' && m[1] === tampered.id ? m : undefined), 'OK(neg-sig)');
+              ws.send(JSON.stringify(['EVENT', tampered]));
+              const [, , ok] = await okPromise;
+              results.push({ check: 'NEG-SIG', expect: 'OK=false (rejected)', got: ok, pass: selfCheckInvalid && ok === false, note: selfCheckInvalid ? '' : '반증 입력 자체가 무효' });
+            } catch (e) {
+              results.push({ check: 'NEG-SIG', expect: 'OK=false (rejected)', got: null, pass: false, note: String(e.message || e) });
+            }
+
+            ws.close();
+            const allPass = results.every((r) => r.pass);
+            console.log(JSON.stringify({ relay: RELAY_URL, pubkey: pk, event_id: event.id, checks: results, verdict: allPass ? 'PASS' : 'FAIL' }, null, 2));
+            process.exit(allPass ? 0 : 1);
+          }
+
+          main().catch((e) => {
+            console.log(JSON.stringify({ ok: false, error: String(e.stack || e) }, null, 2));
+            process.exit(1);
+          });
+          NOSTR_SCRIPT_EOF
+
+      - name: Run against wss://relay.damus.io (실물 relay, 이 러너의 아웃바운드로 직접)
+        run: node nostr-publish-verify.js | tee /tmp/nostr_result.json
+        env:
+          RELAY_URL: wss://relay.damus.io
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "## Nostr WSS 게시·회신 읽기 결과 (relay.damus.io, 실물 실행)"
+            echo
+            echo '```json'
+            cat /tmp/nostr_result.json 2>/dev/null || echo "(결과 파일 없음 — 이전 스텝이 커넥트 단계에서 실패)"
+            echo '```'
+            echo
+            echo "**범위** — 이 job은 HTTPS(NIP-11) 도달성이 아니라 실제 이벤트 발행·구독(WSS)을 잰다."
+            echo "PASS는 4개 체크(PUBLISH·READBACK·NEG-QUERY·NEG-SIG) 전부가 참일 때만이다."
+          } >> "$GITHUB_STEP_SUMMARY"
