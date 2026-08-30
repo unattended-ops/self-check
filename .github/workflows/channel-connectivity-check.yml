@@ -26,6 +26,7 @@ jobs:
             local expect_regex="$3"     # 빈 문자열이면 스키마 검사 생략(음성 대조용)
             local expect_class="$4"     # "2xx" 또는 "not2xx"
             local extra_header="$5"     # 선택: curl -H로 넘길 헤더 1개 (없으면 빈 문자열)
+            local invert_schema="$6"    # 선택: "1"이면 「스키마가 안 나와야 PASS」로 뒤집는다
 
             body_file=$(mktemp)
             if [ -n "$extra_header" ]; then
@@ -43,9 +44,15 @@ jobs:
               *)   [ "$expect_class" = "not2xx" ] && status_ok="yes" || status_ok="no" ;;
             esac
 
-            schema_ok="yes"
+            matched="yes"
             if [ -n "$expect_regex" ]; then
-              echo "$body" | grep -Eq -- "$expect_regex" && schema_ok="yes" || schema_ok="no"
+              echo "$body" | grep -Eq -- "$expect_regex" && matched="yes" || matched="no"
+            fi
+
+            schema_ok="$matched"
+            if [ "$invert_schema" = "1" ]; then
+              # 음성대조 전용 — 스키마가 「안 나와야」 통과다(헤더로 응답이 갈리는지 확인)
+              [ "$matched" = "no" ] && schema_ok="yes" || schema_ok="no"
             fi
 
             verdict="FAIL"
@@ -93,20 +100,28 @@ jobs:
           # Nostr(relay.damus.io) — 양성: NIP-11 릴레이 정보 문서(HTTPS GET + Accept 헤더)로
           # 이 러너가 릴레이 호스트에 실제로 닿는지 확인한다.
           # ⚠ 범위 한계 — 이것은 HTTPS 도달성 확인이지, WSS(WebSocket) 이벤트 발행·구독 자체를
-          # 검증하지 않는다(§0-ⓘ류 사정거리 명시). 실제 게시·회신 읽기(nostr-tools SimplePool)는
-          # 이 검사가 PASS라는 전제 위에서 별도로 검증해야 한다 — 이 워크플로가 그 자리까지는 안 간다.
+          # 검증하지 않는다.
           check "Nostr 양성(relay.damus.io NIP-11)" \
             "https://relay.damus.io/" \
             '"supported_nips"|"name"' \
             "2xx" \
             "Accept: application/nostr+json"
 
-          # Nostr — 음성 대조: 존재하지 않는 경로는 반드시 비2xx여야 한다.
-          check "Nostr 음성대조(없는 경로)" \
-            "https://relay.damus.io/this-path-does-not-exist-xyz" \
+          # 🆕 Nostr — 음성 대조(2판, run #4 실측 후 재설계).
+          # 1판은 "존재하지 않는 경로"를 썼으나 실제 GitHub Actions 러너 실행(run #4)에서 FAIL이 났다 —
+          # relay.damus.io는 nostr+json 헤더가 붙으면 경로와 무관하게 같은 NIP-11 문서를 200으로
+          # 돌려준다(REST API가 아니라 「헤더 하나로 갈리는 서버」라 경로 기반 음성대조 자체가 이
+          # 채널에는 안 맞았다 — 스푸핑이 아니라 이 서버 자체의 정상 동작으로 판단한다: 같은 실행에서
+          # Bluesky·Mastodon 음성대조는 정확히 400/404로 구분됐다).
+          # 그래서 축을 「경로」에서 「헤더」로 바꿨다 — 같은 URL·같은 서버에 nostr+json 헤더를
+          # 빼고 요청해서, 그 헤더가 실제로 응답을 가르는 변수인지를 대조군 삼아 확인한다
+          # (㉷ 원칙 — 대조군은 자기가 변화시킨 축만 보증한다. 이번엔 「헤더 유무」 축 하나만 바꿨다).
+          check "Nostr 음성대조(nostr+json 헤더 없이 요청)" \
+            "https://relay.damus.io/" \
+            '"supported_nips"|"name"' \
+            "2xx" \
             "" \
-            "not2xx" \
-            "Accept: application/nostr+json"
+            "1"
 
           {
             echo "## 채널 연결성 확인 결과 (이 러너 자신에서 실측)"
@@ -116,14 +131,16 @@ jobs:
             cat /tmp/summary_rows.txt
             echo
             echo "**판정 규칙** — 양성 검사는 (curl 성공 AND HTTP 2xx AND 응답 바디에 기대 스키마 문자열 포함)일 때만 PASS."
-            echo "음성 대조는 (curl 성공 AND HTTP 비2xx)일 때 PASS — '진짜 오류가 진짜 오류로 온다'를 확인해,"
+            echo "음성 대조는 보통 (curl 성공 AND HTTP 비2xx)일 때 PASS다 — '진짜 오류가 진짜 오류로 온다'를 확인해,"
             echo "어떤 경로가 모든 요청에 200을 위장해서 돌려주는 상황(§0-Ⓧ류 오탐)을 걸러낸다."
+            echo "**Nostr 음성대조만 예외** — 상태코드가 아니라 헤더를 뺐을 때 스키마가 사라지는지로 가른다"
+            echo "(NIP-11은 경로가 아니라 헤더로 갈리는 서버라서다)."
             echo
             echo "**읽는 법**"
             echo "- 대조군이 FAIL이면 이 러너 자체가 지금 막혀 있다는 뜻이다 — 나머지 결과는 무시한다."
             echo "- 대조군 PASS인데 어느 채널의 양성이 FAIL이면 그 채널만 막힌 것이다(호스트 차단 가능성)."
-            echo "- 어느 채널의 양성은 PASS인데 그 채널 음성대조가 FAIL(=오류 요청도 200)이면,"
-            echo "  그 양성 PASS는 못 믿는다 — 진짜 도달이 아니라 위장 응답일 수 있다."
+            echo "- 어느 채널의 양성은 PASS인데 그 채널 음성대조가 FAIL이면, 그 양성 PASS는 못 믿는다 —"
+            echo "  진짜 도달이 아니라 위장 응답일 수 있다."
             echo "- 양성·음성대조가 둘 다 PASS일 때만 '이 러너에서 이 채널에 실제로 도달한다'고 결론 내린다."
             echo "- **Nostr 두 줄은 HTTPS(NIP-11) 도달성만 잰다 — WSS 게시·회신 읽기 자체는 이 검사의 범위 밖이다.**"
           } >> "$GITHUB_STEP_SUMMARY"
