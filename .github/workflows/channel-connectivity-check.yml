@@ -1,4 +1,4 @@
-name: Channel Connectivity Check (Bluesky / Mastodon)
+name: Channel Connectivity Check (Bluesky / Mastodon / Nostr)
 
 on:
   workflow_dispatch: {}
@@ -25,9 +25,14 @@ jobs:
             local url="$2"
             local expect_regex="$3"     # 빈 문자열이면 스키마 검사 생략(음성 대조용)
             local expect_class="$4"     # "2xx" 또는 "not2xx"
+            local extra_header="$5"     # 선택: curl -H로 넘길 헤더 1개 (없으면 빈 문자열)
 
             body_file=$(mktemp)
-            http_code=$(curl -sS -o "$body_file" -w '%{http_code}' --max-time 15 "$url")
+            if [ -n "$extra_header" ]; then
+              http_code=$(curl -sS -o "$body_file" -w '%{http_code}' --max-time 15 -H "$extra_header" "$url")
+            else
+              http_code=$(curl -sS -o "$body_file" -w '%{http_code}' --max-time 15 "$url")
+            fi
             curl_exit=$?
             body=$(cat "$body_file")
             rm -f "$body_file"
@@ -68,8 +73,6 @@ jobs:
             "2xx"
 
           # Bluesky — 음성 대조: 필수 파라미터(actor)를 뺀 요청은 반드시 비2xx여야 한다.
-          # 이것도 2xx로 오면, 요청이 실제 Bluesky가 아니라 무언가에 가로채져
-          # 전부 200으로 응답받고 있다는 신호다 — 위 양성 판정을 못 믿는다.
           check "Bluesky 음성대조(파라미터 누락)" \
             "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile" \
             "" \
@@ -87,6 +90,24 @@ jobs:
             "" \
             "not2xx"
 
+          # Nostr(relay.damus.io) — 양성: NIP-11 릴레이 정보 문서(HTTPS GET + Accept 헤더)로
+          # 이 러너가 릴레이 호스트에 실제로 닿는지 확인한다.
+          # ⚠ 범위 한계 — 이것은 HTTPS 도달성 확인이지, WSS(WebSocket) 이벤트 발행·구독 자체를
+          # 검증하지 않는다(§0-ⓘ류 사정거리 명시). 실제 게시·회신 읽기(nostr-tools SimplePool)는
+          # 이 검사가 PASS라는 전제 위에서 별도로 검증해야 한다 — 이 워크플로가 그 자리까지는 안 간다.
+          check "Nostr 양성(relay.damus.io NIP-11)" \
+            "https://relay.damus.io/" \
+            '"supported_nips"|"name"' \
+            "2xx" \
+            "Accept: application/nostr+json"
+
+          # Nostr — 음성 대조: 존재하지 않는 경로는 반드시 비2xx여야 한다.
+          check "Nostr 음성대조(없는 경로)" \
+            "https://relay.damus.io/this-path-does-not-exist-xyz" \
+            "" \
+            "not2xx" \
+            "Accept: application/nostr+json"
+
           {
             echo "## 채널 연결성 확인 결과 (이 러너 자신에서 실측)"
             echo
@@ -99,17 +120,18 @@ jobs:
             echo "어떤 경로가 모든 요청에 200을 위장해서 돌려주는 상황(§0-Ⓧ류 오탐)을 걸러낸다."
             echo
             echo "**읽는 법**"
-            echo "- 대조군이 FAIL이면 이 러너 자체가 지금 막혀 있다는 뜻이다 — Bluesky/Mastodon 결과는 무시한다."
+            echo "- 대조군이 FAIL이면 이 러너 자체가 지금 막혀 있다는 뜻이다 — 나머지 결과는 무시한다."
             echo "- 대조군 PASS인데 어느 채널의 양성이 FAIL이면 그 채널만 막힌 것이다(호스트 차단 가능성)."
             echo "- 어느 채널의 양성은 PASS인데 그 채널 음성대조가 FAIL(=오류 요청도 200)이면,"
             echo "  그 양성 PASS는 못 믿는다 — 진짜 도달이 아니라 위장 응답일 수 있다."
             echo "- 양성·음성대조가 둘 다 PASS일 때만 '이 러너에서 이 채널에 실제로 도달한다'고 결론 내린다."
+            echo "- **Nostr 두 줄은 HTTPS(NIP-11) 도달성만 잰다 — WSS 게시·회신 읽기 자체는 이 검사의 범위 밖이다.**"
           } >> "$GITHUB_STEP_SUMMARY"
 
           cat /tmp/summary_rows.txt
 
           if grep -q "대조군: dev.to.*FAIL" /tmp/summary_rows.txt; then
-            echo "::error::대조군(dev.to)이 FAIL — 이 러너 자체의 아웃바운드가 지금 막혀 있을 수 있다. Bluesky/Mastodon 결과는 이 상태에서 신뢰할 수 없다."
+            echo "::error::대조군(dev.to)이 FAIL — 이 러너 자체의 아웃바운드가 지금 막혀 있을 수 있다. 나머지 결과는 이 상태에서 신뢰할 수 없다."
             exit 1
           fi
           exit 0
