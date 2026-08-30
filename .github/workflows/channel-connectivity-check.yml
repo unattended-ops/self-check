@@ -298,3 +298,173 @@ jobs:
             echo "**범위** — 이 job은 HTTPS(NIP-11) 도달성이 아니라 실제 이벤트 발행·구독(WSS)을 잰다."
             echo "PASS는 4개 체크(PUBLISH·READBACK·NEG-QUERY·NEG-SIG) 전부가 참일 때만이다."
           } >> "$GITHUB_STEP_SUMMARY"
+
+
+  # 🆕 신규 job — Bluesky 인증된 게시·회신(알림) 읽기 (HTTPS 도달성이 아니라 실제 로그인·쓰기·읽기를 잰다)
+  # secrets: BSKY_HANDLE, BSKY_APP_PASSWORD (창업자가 저장소 Secrets에 등록)
+  bluesky_authenticated_post_read:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login, publish, read notifications, negative-auth check
+        shell: bash
+        env:
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+        run: |
+          #!/usr/bin/env bash
+          set -u
+          set +e
+
+          POST_TEXT="🤖 First automated post — verifying this unattended-ops pipeline can authenticate, publish, and read its own notifications end-to-end. (probe $(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          BASE="${BSKY_SERVICE:-https://bsky.social}"
+
+          fail() { echo "::error::$1"; echo "FAIL: $1" >> /tmp/bsky_result.txt; exit 1; }
+
+          if [ -z "${BSKY_HANDLE:-}" ] || [ -z "${BSKY_APP_PASSWORD:-}" ]; then
+            fail "BSKY_HANDLE 또는 BSKY_APP_PASSWORD secret이 비어 있음"
+          fi
+
+          # 1) LOGIN — 앱 비밀번호로 세션 발급
+          SESSION=$(curl -sS -X POST "$BASE/xrpc/com.atproto.server.createSession" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg id "$BSKY_HANDLE" --arg pw "$BSKY_APP_PASSWORD" '{identifier:$id, password:$pw}')")
+          ACCESS_JWT=$(echo "$SESSION" | jq -r '.accessJwt // empty')
+          DID=$(echo "$SESSION" | jq -r '.did // empty')
+          if [ -z "$ACCESS_JWT" ] || [ -z "$DID" ]; then
+            fail "LOGIN 실패 — $(echo "$SESSION" | jq -c '{error,message}' 2>/dev/null || echo "$SESSION" | head -c 200)"
+          fi
+          echo "LOGIN OK — did=$DID"
+
+          # 2) PUBLISH — 인증된 게시
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          POST_BODY=$(jq -n --arg did "$DID" --arg text "$POST_TEXT" --arg now "$NOW" \
+            '{repo:$did, collection:"app.bsky.feed.post", record:{"$type":"app.bsky.feed.post", text:$text, createdAt:$now}}')
+          POST_RESP=$(curl -sS -X POST "$BASE/xrpc/com.atproto.repo.createRecord" \
+            -H "Authorization: Bearer $ACCESS_JWT" -H "Content-Type: application/json" \
+            -d "$POST_BODY")
+          POST_URI=$(echo "$POST_RESP" | jq -r '.uri // empty')
+          if [ -z "$POST_URI" ]; then
+            fail "PUBLISH 실패 — $(echo "$POST_RESP" | jq -c '{error,message}' 2>/dev/null || echo "$POST_RESP" | head -c 200)"
+          fi
+          echo "PUBLISH OK — uri=$POST_URI"
+
+          # 3) READBACK(회신·알림 읽기) — 인증된 조회
+          READ_HTTP=$(curl -sS -o /tmp/bsky_notif.json -w '%{http_code}' \
+            "$BASE/xrpc/app.bsky.notification.listNotifications" \
+            -H "Authorization: Bearer $ACCESS_JWT")
+          if [ "$READ_HTTP" != "200" ]; then
+            fail "READBACK 실패 — http=$READ_HTTP"
+          fi
+          NOTIF_OK=$(jq 'has("notifications")' /tmp/bsky_notif.json 2>/dev/null)
+          if [ "$NOTIF_OK" != "true" ]; then
+            fail "READBACK 응답 스키마 이상 — notifications 키 없음"
+          fi
+          echo "READBACK OK — http=200, notifications 필드 확인"
+
+          # 4) NEG-AUTH(반증) — 인증 헤더 없이 같은 엔드포인트를 부르면 반드시 실패해야 한다.
+          #    이게 없으면 "이 엔드포인트가 원래 아무나 호출해도 200을 주는" 상황을 PASS로 오판한다.
+          NEG_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' \
+            "$BASE/xrpc/app.bsky.notification.listNotifications")
+          if [ "$NEG_HTTP" = "200" ]; then
+            fail "NEG-AUTH 실패 — 인증 없이도 200이 왔다(이 읽기 자리가 실제로 인증을 요구하는지 못 믿는다)"
+          fi
+          echo "NEG-AUTH OK — 인증 없는 요청은 http=$NEG_HTTP (2xx 아님, 정상)"
+
+          {
+            echo "verdict=PASS"
+            echo "post_uri=$POST_URI"
+            echo "did=$DID"
+            echo "neg_auth_http=$NEG_HTTP"
+          } > /tmp/bsky_result.txt
+          cat /tmp/bsky_result.txt
+          exit 0
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "## Bluesky 인증된 게시·읽기 결과 (실물 실행)"
+            echo
+            echo '```'
+            cat /tmp/bsky_result.txt 2>/dev/null || echo "(결과 파일 없음 — 위 스텝이 실패로 중단됨, 로그 참조)"
+            echo '```'
+            echo
+            echo "**범위** — LOGIN(세션 발급) → PUBLISH(인증된 게시) → READBACK(인증된 알림 조회) →"
+            echo "NEG-AUTH(반증 — 인증 없이 같은 엔드포인트를 부르면 반드시 실패해야 함) 4단계 전부가 PASS일 때만 성공이다."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # 🆕 신규 job — Mastodon 인증된 게시·회신(알림) 읽기
+  # secrets: MASTODON_ACCESS_TOKEN, MASTODON_INSTANCE (창업자가 저장소 Secrets에 등록)
+  mastodon_authenticated_post_read:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish, read notifications, negative-auth check
+        shell: bash
+        env:
+          MASTODON_ACCESS_TOKEN: ${{ secrets.MASTODON_ACCESS_TOKEN }}
+          MASTODON_INSTANCE: ${{ secrets.MASTODON_INSTANCE }}
+        run: |
+          #!/usr/bin/env bash
+          set -u
+          set +e
+
+          POST_TEXT="🤖 First automated post — verifying this unattended-ops pipeline can authenticate, publish, and read its own notifications end-to-end. (probe $(date -u +%Y-%m-%dT%H:%M:%SZ))"
+
+          fail() { echo "::error::$1"; echo "FAIL: $1" >> /tmp/masto_result.txt; exit 1; }
+
+          if [ -z "${MASTODON_ACCESS_TOKEN:-}" ] || [ -z "${MASTODON_INSTANCE:-}" ]; then
+            fail "MASTODON_ACCESS_TOKEN 또는 MASTODON_INSTANCE secret이 비어 있음"
+          fi
+
+          # 1) PUBLISH — 인증된 게시
+          POST_RESP=$(curl -sS -X POST "${MASTODON_INSTANCE}/api/v1/statuses" \
+            -H "Authorization: Bearer ${MASTODON_ACCESS_TOKEN}" \
+            --data-urlencode "status=${POST_TEXT}" \
+            --data-urlencode "visibility=public")
+          POST_ID=$(echo "$POST_RESP" | jq -r '.id // empty')
+          if [ -z "$POST_ID" ]; then
+            fail "PUBLISH 실패 — $(echo "$POST_RESP" | jq -c '{error}' 2>/dev/null || echo "$POST_RESP" | head -c 200)"
+          fi
+          echo "PUBLISH OK — id=$POST_ID"
+
+          # 2) READBACK(회신·알림 읽기) — 인증된 조회
+          READ_HTTP=$(curl -sS -o /tmp/masto_notif.json -w '%{http_code}' \
+            "${MASTODON_INSTANCE}/api/v1/notifications" \
+            -H "Authorization: Bearer ${MASTODON_ACCESS_TOKEN}")
+          if [ "$READ_HTTP" != "200" ]; then
+            fail "READBACK 실패 — http=$READ_HTTP"
+          fi
+          IS_ARRAY=$(jq 'type=="array"' /tmp/masto_notif.json 2>/dev/null)
+          if [ "$IS_ARRAY" != "true" ]; then
+            fail "READBACK 응답 스키마 이상 — 배열이 아님"
+          fi
+          echo "READBACK OK — http=200, 배열 응답 확인"
+
+          # 3) NEG-AUTH(반증) — 인증 헤더 없이 같은 엔드포인트를 부르면 반드시 실패해야 한다.
+          NEG_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' "${MASTODON_INSTANCE}/api/v1/notifications")
+          if [ "$NEG_HTTP" = "200" ]; then
+            fail "NEG-AUTH 실패 — 인증 없이도 200이 왔다"
+          fi
+          echo "NEG-AUTH OK — 인증 없는 요청은 http=$NEG_HTTP (2xx 아님, 정상)"
+
+          {
+            echo "verdict=PASS"
+            echo "post_id=$POST_ID"
+            echo "neg_auth_http=$NEG_HTTP"
+          } > /tmp/masto_result.txt
+          cat /tmp/masto_result.txt
+          exit 0
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "## Mastodon 인증된 게시·읽기 결과 (실물 실행)"
+            echo
+            echo '```'
+            cat /tmp/masto_result.txt 2>/dev/null || echo "(결과 파일 없음 — 위 스텝이 실패로 중단됨, 로그 참조)"
+            echo '```'
+            echo
+            echo "**범위** — PUBLISH(인증된 게시) → READBACK(인증된 알림 조회) →"
+            echo "NEG-AUTH(반증 — 인증 없이 같은 엔드포인트를 부르면 반드시 실패해야 함) 3단계 전부가 PASS일 때만 성공이다."
+          } >> "$GITHUB_STEP_SUMMARY"
