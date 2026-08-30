@@ -179,16 +179,33 @@ jobs:
             echo "🔴 게이트 중단 — 계정 상태를 못 읽었다. 못 읽었으면 발행하지 않는다" >> /tmp/pub.txt
             cat /tmp/pub.txt; exit 0
           fi
-          # ── 게이트 ② 같은 제목이 이미 계정에 있는가 (18행·§2-R이 막던 것) ──
+          # ── 게이트 ② 같은 제목이 이미 있는가 — dev.to 목록 ∪ 로컬 published/ 합집합으로 본다 (2026-08-28 §5-77 패치) ──
+          # 실측(69·70차) — dev.to 계정 목록 질의가 방금 발행한 글을 최소 396분 이상 반영 못 하는
+          # 서버측 캐시 지연을 보인다(forem/forem GitHub 이슈 #10418 — 공식 해결책 없음, 강제 무효화 방법 없음).
+          # published/ 는 이 파이프라인이 발행에 성공할 때마다 같은 잡 안에서 즉시 커밋하는 로컬 기록이라
+          # 이 캐시가 끼어들 여지가 없다 — 두 출처 중 하나에서라도 겹치면 막는다(OR, 합집합).
           norm() { echo "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]'; }
           NT=$(norm "$TITLE")
-          DUP=$(jq -r '.[].title' /tmp/g.json | while read -r t; do
+          DUP=""
+          D1=$(jq -r '.[].title' /tmp/g.json | while read -r t; do
                   [ "$(norm "$t")" = "$NT" ] && echo HIT; done | head -1)
-          if [ "$DUP" = "HIT" ]; then
-            echo "🔴 게이트 중단 — 같은 제목이 계정에 이미 있다. 중복 게시를 막았다" >> /tmp/pub.txt
+          [ "$D1" = "HIT" ] && DUP="dev.to 목록"
+          if [ -z "$DUP" ]; then
+            for f in published/*.md; do
+              [ -e "$f" ] || continue
+              LT=$(sed -n 's/^title:[[:space:]]*//p' "$f" | head -1 | sed 's/^"//; s/"$//')
+              [ -z "$LT" ] && continue
+              if [ "$(norm "$LT")" = "$NT" ]; then
+                DUP="로컬 published/$(basename "$f")"
+                break
+              fi
+            done
+          fi
+          if [ -n "$DUP" ]; then
+            echo "🔴 게이트 중단 — 같은 제목이 이미 있다(출처: $DUP). 중복 게시를 막았다" >> /tmp/pub.txt
             cat /tmp/pub.txt; exit 0
           fi
-          echo "게이트 통과 — 계정에 같은 제목 없음" >> /tmp/pub.txt
+          echo "게이트 통과 — dev.to 목록·로컬 published/ 둘 다 같은 제목 없음" >> /tmp/pub.txt
           # ── 발행 ──
           jq -n --arg t "$TITLE" --arg b "$BODY" --arg g "$TAGS" \
             '{article:{title:$t,published:true,body_markdown:$b,tags:($g|split(",")|map(gsub("^ +| +$";"")))}}' \
